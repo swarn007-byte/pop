@@ -52,7 +52,9 @@ const (
 // Model is Pop's application model.
 type Model struct {
 	// state represents the current state of the application.
-	state State
+	state             State
+	terminalHeight    int
+	defaultBodyHeight int
 
 	// DeliveryMethod is whether we are using DeliveryMethod or Resend.
 	DeliveryMethod DeliveryMethod
@@ -223,20 +225,21 @@ func NewModel(defaults resend.SendEmailRequest, deliveryMethod DeliveryMethod) M
 	loadingSpinner.Spinner = spinner.Dot
 
 	m := Model{
-		state:          state,
-		From:           from,
-		To:             to,
-		showCc:         len(cc.Value()) > 0 || len(bcc.Value()) > 0,
-		Cc:             cc,
-		Bcc:            bcc,
-		Subject:        subject,
-		Body:           body,
-		Attachments:    attachments,
-		filepicker:     picker,
-		help:           help.New(),
-		keymap:         DefaultKeybinds(),
-		loadingSpinner: loadingSpinner,
-		DeliveryMethod: deliveryMethod,
+		state:             state,
+		defaultBodyHeight: body.Height(),
+		From:              from,
+		To:                to,
+		showCc:            len(cc.Value()) > 0 || len(bcc.Value()) > 0,
+		Cc:                cc,
+		Bcc:               bcc,
+		Subject:           subject,
+		Body:              body,
+		Attachments:       attachments,
+		filepicker:        picker,
+		help:              help.New(),
+		keymap:            DefaultKeybinds(),
+		loadingSpinner:    loadingSpinner,
+		DeliveryMethod:    deliveryMethod,
 	}
 
 	m.focusActiveInput()
@@ -273,6 +276,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil
 	case tea.WindowSizeMsg:
 		m.setCommonWidths(msg.Width)
+		m.terminalHeight = max(1, msg.Height)
+		// Shrink the body to leave room for fields, actions, help and padding.
+		m.Body.SetHeight(m.defaultBodyHeight)
+		measurement := m
+		measurement.terminalHeight = 0
+		measurement.state = editingFrom
+		overhead := lipgloss.Height(measurement.View().Content) - m.Body.Height()
+		m.Body.SetHeight(max(1, min(m.defaultBodyHeight, m.terminalHeight-overhead)))
 	case tea.KeyPressMsg:
 		switch {
 		case key.Matches(msg, m.keymap.NextInput):
@@ -398,15 +409,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) setCommonWidths(width int) {
-	inputWidth := width - paddedStyle.GetHorizontalFrameSize() - lipgloss.Width("Subject ")
+	width = max(1, width-paddedStyle.GetHorizontalFrameSize())
+	inputWidth := max(1, width-lipgloss.Width("Subject "))
 	m.From.SetWidth(inputWidth)
 	m.To.SetWidth(inputWidth)
 	m.Cc.SetWidth(inputWidth)
 	m.Bcc.SetWidth(inputWidth)
 	m.Subject.SetWidth(inputWidth)
-	m.Body.SetWidth(width - paddedStyle.GetHorizontalFrameSize())
-	m.Attachments.SetWidth(width - paddedStyle.GetHorizontalFrameSize())
-	m.help.SetWidth(width - paddedStyle.GetHorizontalFrameSize())
+	m.Body.SetWidth(width)
+	m.Attachments.SetWidth(width)
+	m.help.SetWidth(width)
 }
 
 func (m *Model) blurInputs() {
@@ -482,8 +494,15 @@ func (m Model) View() tea.View {
 	s.WriteString("\n\n")
 	s.WriteString(m.Body.View())
 	s.WriteString("\n\n")
+	focusRow := strings.Count(s.String(), "\n")
+	if m.state == editingAttachments {
+		focusRow += min(m.Attachments.Index()+1, max(0, m.Attachments.Height()-1))
+	}
 	s.WriteString(m.Attachments.View())
 	s.WriteString("\n")
+	if m.state == hoveringSendButton {
+		focusRow = strings.Count(s.String(), "\n")
+	}
 	if m.state == hoveringSendButton && m.canSend() {
 		s.WriteString(sendButtonActiveStyle.Render("Send"))
 	} else if m.state == hoveringSendButton {
@@ -543,6 +562,21 @@ func (m Model) View() tea.View {
 		}
 	case editingAttachments, hoveringSendButton, pickingFile, sendingEmail:
 		// No cursor positioning needed for these states.
+	}
+
+	// Bubble Tea clips overflowing views from the top. Follow the focused
+	// control instead so short terminals do not hide the active input.
+	lines := strings.Split(v.Content, "\n")
+	if m.terminalHeight > 0 && len(lines) > m.terminalHeight {
+		focusRow += padY
+		if v.Cursor != nil {
+			focusRow = v.Cursor.Y
+		}
+		offset := min(max(0, focusRow-m.terminalHeight+1), len(lines)-m.terminalHeight)
+		v.Content = strings.Join(lines[offset:offset+m.terminalHeight], "\n")
+		if v.Cursor != nil {
+			v.Cursor.Y -= offset
+		}
 	}
 
 	return v
